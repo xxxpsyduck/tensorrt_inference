@@ -25,11 +25,11 @@ public:
     void LoadEngine();
     bool InferenceFolder(const std::string &folder_name);
 private:
-    void EngineInference(const std::vector<std::string> &image_list, const int &outSize,void **buffers,
+    void EngineInference(const std::string image_name, const int &outSize,void **buffers,
                          const std::vector<int64_t> &bufferSize, cudaStream_t stream);
     void GenerateAnchors();
-    std::vector<float> prepareImage(std::vector<cv::Mat> & vec_img);
-    std::vector<std::vector<FaceRes>> postProcess(const std::vector<cv::Mat> &vec_Mat, float *output, const int &outSize);
+    std::vector<float> prepareImage(cv::Mat src_img);
+    std::vector<std::vector<FaceRes>> postProcess(const cv::Mat src_img, float *output, const int &outSize);
     void NmsDetect(std::vector<FaceRes> &detections);
     static float IOUCalculate(const FaceBox &det_a, const FaceBox &det_b);
 

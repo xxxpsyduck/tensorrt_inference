@@ -32,7 +32,6 @@ RetinaFace::RetinaFace(const std::string &config_file) {
 RetinaFace::~RetinaFace() = default;
 
 void RetinaFace::LoadEngine() {
-    // create and load engine
     std::fstream existEngine;
     existEngine.open(engine_file, std::ios::in);
     if (existEngine) {
@@ -45,7 +44,8 @@ void RetinaFace::LoadEngine() {
 }
 
 bool RetinaFace::InferenceFolder(const std::string &folder_name) {
-    std::vector<std::string> sample_images = readFolder(folder_name);
+    // std::vector<std::string> sample_images = readFolder(folder_name);
+    std::string image_name = "/home/khanhtq/tensorrt_inference/RetinaFace/samples/test.jpg";
     //get context
     assert(engine != nullptr);
     context = engine->createExecutionContext();
@@ -63,7 +63,6 @@ bool RetinaFace::InferenceFolder(const std::string &folder_name) {
         nvinfer1::DataType dtype = engine->getBindingDataType(i);
         int64_t totalSize = volume(dims) * 1 * getElementSize(dtype);
         bufferSize[i] = totalSize;
-        std::cout << "binding" << i << ": " << totalSize << std::endl;
         cudaMalloc(&buffers[i], totalSize);
     }
 
@@ -73,7 +72,7 @@ bool RetinaFace::InferenceFolder(const std::string &folder_name) {
 
     int outSize = int(bufferSize[1] / sizeof(float) / BATCH_SIZE);
 
-    EngineInference(sample_images, outSize, buffers, bufferSize, stream);
+    EngineInference(image_name, outSize, buffers, bufferSize, stream);
 
     // release the stream and the buffers
     cudaStreamDestroy(stream);
@@ -85,108 +84,33 @@ bool RetinaFace::InferenceFolder(const std::string &folder_name) {
     engine->destroy();
 }
 
-void RetinaFace::EngineInference(const std::vector<std::string> &image_list, const int &outSize, void **buffers,
-                                 const std::vector<int64_t> &bufferSize, cudaStream_t stream) {
-    int index = 0;
-    int batch_id = 0;
-    std::vector<cv::Mat> vec_Mat(BATCH_SIZE);
-    std::vector<std::string> vec_name(BATCH_SIZE);
-    cv::Mat face_feature(image_list.size(), outSize, CV_32FC1);
-    float total_time = 0;
-    for (const std::string &image_name : image_list)
-    {
-        index++;
-        std::cout << "Processing: " << image_name << std::endl;
-        cv::Mat src_img = cv::imread(image_name);
-        if (src_img.data)
-        {
-//            cv::cvtColor(src_img, src_img, cv::COLOR_BGR2RGB);
-            vec_Mat[batch_id] = src_img.clone();
-            vec_name[batch_id] = image_name;
-            batch_id++;
-        }
-        if (batch_id == BATCH_SIZE or index == image_list.size())
-        {
-            auto t_start_pre = std::chrono::high_resolution_clock::now();
-            std::cout << "prepareImage" << std::endl;
-            std::vector<float>curInput = prepareImage(vec_Mat);
-            auto t_end_pre = std::chrono::high_resolution_clock::now();
-            float total_pre = std::chrono::duration<float, std::milli>(t_end_pre - t_start_pre).count();
-            std::cout << "prepare image take: " << total_pre << " ms." << std::endl;
-            total_time += total_pre;
-            batch_id = 0;
-            if (!curInput.data()) {
-                std::cout << "prepare images ERROR!" << std::endl;
-                continue;
-            }
-            // DMA the input to the GPU,  execute the batch asynchronously, and DMA it back:
-            std::cout << "host2device" << std::endl;
-            cudaMemcpyAsync(buffers[0], curInput.data(), bufferSize[0], cudaMemcpyHostToDevice, stream);
+void RetinaFace::EngineInference(const std::string image_name, const int &outSize, void **buffers, const std::vector<int64_t> &bufferSize, cudaStream_t stream) {
+    cv::Mat src_img = cv::imread(image_name);
 
-            // do inference
-            std::cout << "execute" << std::endl;
-            auto t_start = std::chrono::high_resolution_clock::now();
-            context->execute(BATCH_SIZE, buffers);
-            auto t_end = std::chrono::high_resolution_clock::now();
-            float total_inf = std::chrono::duration<float, std::milli>(t_end - t_start).count();
-            std::cout << "Inference take: " << total_inf << " ms." << std::endl;
-            total_time += total_inf;
-            std::cout << "execute success" << std::endl;
-            std::cout << "device2host" << std::endl;
-            std::cout << "post process" << std::endl;
-            auto r_start = std::chrono::high_resolution_clock::now();
-            auto *out = new float[outSize * BATCH_SIZE];
-            cudaMemcpyAsync(out, buffers[1], bufferSize[1], cudaMemcpyDeviceToHost, stream);
-            cudaStreamSynchronize(stream);
-            auto faces = postProcess(vec_Mat, out, outSize);
-            delete[] out;
-            auto r_end = std::chrono::high_resolution_clock::now();
-            float total_res = std::chrono::duration<float, std::milli>(r_end - r_start).count();
-            std::cout << "Post process take: " << total_res << " ms." << std::endl;
-            for (int i = 0; i < (int)vec_Mat.size(); i++)
-            {
-                auto org_img = vec_Mat[i];
-                if (!org_img.data)
-                    continue;
-                auto rects = faces[i];
-//                cv::cvtColor(org_img, org_img, cv::COLOR_BGR2RGB);
-                for(const auto &rect : rects)
-                {
-                    char name[256];
-                    cv::Scalar color;
-                    sprintf(name, "%.2f", rect.confidence);
-                    if (rect.has_mask) {
-                        color = cv::Scalar(0, 0, 255);
-                        cv::putText(org_img, "mask", cv::Point(rect.face_box.x - rect.face_box.w / 2,rect.face_box.y - rect.face_box.h / 2 + 15),
-                                    cv::FONT_HERSHEY_COMPLEX, 0.7, color, 2);
-                    } else {
-                        color = cv::Scalar(255, 0, 0);
-                    }
-                    cv::putText(org_img, name, cv::Point(rect.face_box.x - rect.face_box.w / 2,rect.face_box.y - rect.face_box.h / 2 - 5),
-                            cv::FONT_HERSHEY_COMPLEX, 0.7, color, 2);
-                    cv::Rect box(rect.face_box.x - rect.face_box.w / 2, rect.face_box.y - rect.face_box.h / 2, rect.face_box.w, rect.face_box.h);
-                    cv::rectangle(org_img, box, color, 2, cv::LINE_8, 0);
-                    for (int k = 0; k < rect.keypoints.size(); k++)
-                    {
-                        cv::Point2f key_point = rect.keypoints[k];
-                        if (k % 3 == 0)
-                            cv::circle(org_img, key_point, 3, cv::Scalar(0, 255, 0), -1);
-                        else if (k % 3 == 1)
-                            cv::circle(org_img, key_point, 3, cv::Scalar(255, 0, 255), -1);
-                        else
-                            cv::circle(org_img, key_point, 3, cv::Scalar(0, 255, 255), -1);
-                    }
-                }
-                int pos = vec_name[i].find_last_of(".");
-                std::string rst_name = vec_name[i].insert(pos, "_");
-                std::cout << rst_name << std::endl;
-                cv::imwrite(rst_name, org_img);
-            }
-            total_time += total_res;
-            vec_Mat = std::vector<cv::Mat>(BATCH_SIZE);
-        }
+    auto org_img = src_img.clone();
+
+    std::vector<float>curInput = prepareImage(org_img);
+
+    cudaMemcpyAsync(buffers[0], curInput.data(), bufferSize[0], cudaMemcpyHostToDevice, stream);
+
+    context->execute(BATCH_SIZE, buffers);
+
+    auto *out = new float[outSize * BATCH_SIZE];
+    cudaMemcpyAsync(out, buffers[1], bufferSize[1], cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    auto faces = postProcess(org_img, out, outSize);
+    delete[] out;
+
+    auto rects = faces[0];
+    std::cout << "rects size: " << rects.size() << std::endl;
+    for(const auto &rect : rects)
+    {
+        cv::Rect box(rect.face_box.x - rect.face_box.w / 2, rect.face_box.y - rect.face_box.h / 2, rect.face_box.w, rect.face_box.h);
+        cv::rectangle(org_img, box, cv::Scalar(255, 0, 0), 2, cv::LINE_8, 0);
+
     }
-    std::cout << "Average processing time is " << total_time / image_list.size() << "ms" << std::endl;
+    cv::imwrite("result.jpg", org_img);
+
 }
 
 void RetinaFace::GenerateAnchors() {
@@ -211,84 +135,69 @@ void RetinaFace::GenerateAnchors() {
     }
 }
 
-std::vector<float> RetinaFace::prepareImage(std::vector<cv::Mat> &vec_img) {
+std::vector<float> RetinaFace::prepareImage(cv::Mat src_img) {
     std::vector<float> result(BATCH_SIZE * IMAGE_WIDTH * IMAGE_HEIGHT * INPUT_CHANNEL);
     float *data = result.data();
     int index = 0;
-    for (const cv::Mat &src_img : vec_img)
-    {
-        if (!src_img.data)
-            continue;
-        float ratio = float(IMAGE_WIDTH) / float(src_img.cols) < float(IMAGE_HEIGHT) / float(src_img.rows) ? float(IMAGE_WIDTH) / float(src_img.cols) : float(IMAGE_HEIGHT) / float(src_img.rows);
-        cv::Mat flt_img = cv::Mat::zeros(cv::Size(IMAGE_WIDTH, IMAGE_HEIGHT), CV_8UC3);
-        cv::Mat rsz_img;
-        cv::resize(src_img, rsz_img, cv::Size(), ratio, ratio);
-        rsz_img.copyTo(flt_img(cv::Rect(0, 0, rsz_img.cols, rsz_img.rows)));
-        flt_img.convertTo(flt_img, CV_32FC3);
+    float ratio = float(IMAGE_WIDTH) / float(src_img.cols) < float(IMAGE_HEIGHT) / float(src_img.rows) ? float(IMAGE_WIDTH) / float(src_img.cols) : float(IMAGE_HEIGHT) / float(src_img.rows);
+    cv::Mat flt_img = cv::Mat::zeros(cv::Size(IMAGE_WIDTH, IMAGE_HEIGHT), CV_8UC3);
+    cv::Mat rsz_img;
+    cv::resize(src_img, rsz_img, cv::Size(), ratio, ratio);
+    rsz_img.copyTo(flt_img(cv::Rect(0, 0, rsz_img.cols, rsz_img.rows)));
+    flt_img.convertTo(flt_img, CV_32FC3);
 
-        //HWC TO CHW
-        int channelLength = IMAGE_WIDTH * IMAGE_HEIGHT;
-        std::vector<cv::Mat> split_img = {
-                cv::Mat(IMAGE_WIDTH, IMAGE_HEIGHT, CV_32FC1, data + channelLength * (index + 2)),
-                cv::Mat(IMAGE_WIDTH, IMAGE_HEIGHT, CV_32FC1, data + channelLength * (index + 1)),
-                cv::Mat(IMAGE_WIDTH, IMAGE_HEIGHT, CV_32FC1, data + channelLength * index)
-        };
-        index += 3;
-        cv::split(flt_img, split_img);
-    }
+    int channelLength = IMAGE_WIDTH * IMAGE_HEIGHT;
+    std::vector<cv::Mat> split_img = {
+            cv::Mat(IMAGE_WIDTH, IMAGE_HEIGHT, CV_32FC1, data + channelLength * (index + 2)),
+            cv::Mat(IMAGE_WIDTH, IMAGE_HEIGHT, CV_32FC1, data + channelLength * (index + 1)),
+            cv::Mat(IMAGE_WIDTH, IMAGE_HEIGHT, CV_32FC1, data + channelLength * index)
+    };
+    cv::split(flt_img, split_img);
+
     return result;
 }
 
-std::vector<std::vector<RetinaFace::FaceRes>> RetinaFace::postProcess(const std::vector<cv::Mat> &vec_Mat,
-        float *output, const int &outSize) {
+std::vector<std::vector<RetinaFace::FaceRes>> RetinaFace::postProcess(const cv::Mat src_img, float *output, const int &outSize) {
     std::vector<std::vector<FaceRes>> vec_result;
     int index = 0;
-    for (const cv::Mat &src_img : vec_Mat)
-    {
-        std::vector<FaceRes> result;
-        float *out = output + index * outSize;
-        float ratio = float(src_img.cols) / float(IMAGE_WIDTH) > float(src_img.rows) / float(IMAGE_HEIGHT)  ? float(src_img.cols) / float(IMAGE_WIDTH) : float(src_img.rows) / float(IMAGE_HEIGHT);
 
-        int result_cols = (detect_mask ? 2 : 1) + bbox_head + landmark_head;
-        cv::Mat result_matrix = cv::Mat(sum_of_feature, result_cols, CV_32FC1, out);
+    std::vector<FaceRes> result;
+    float *out = output + index * outSize;
+    float ratio = float(src_img.cols) / float(IMAGE_WIDTH) > float(src_img.rows) / float(IMAGE_HEIGHT)  ? float(src_img.cols) / float(IMAGE_WIDTH) : float(src_img.rows) / float(IMAGE_HEIGHT);
 
-        for (int item = 0; item < result_matrix.rows; ++item) {
-            auto *current_row = result_matrix.ptr<float>(item);
-            if(current_row[0] > obj_threshold){
-                FaceRes headbox;
-                headbox.confidence = current_row[0];
-                auto *anchor = refer_matrix.ptr<float>(item);
-                auto *bbox = current_row + 1;
-                auto *keyp = current_row + 1 + bbox_head;
-                auto *mask = current_row + 1 + bbox_head + landmark_head;
+    int result_cols = (detect_mask ? 2 : 1) + bbox_head + landmark_head;
+    cv::Mat result_matrix = cv::Mat(sum_of_feature, result_cols, CV_32FC1, out);
 
-                headbox.face_box.x = (anchor[0] + bbox[0] * anchor[2]) * ratio;
-                headbox.face_box.y = (anchor[1] + bbox[1] * anchor[3]) * ratio;
-                headbox.face_box.w = anchor[2] * exp(bbox[2]) * ratio;
-                headbox.face_box.h = anchor[3] * exp(bbox[3]) * ratio;
+    for (int item = 0; item < result_matrix.rows; ++item) {
+        auto *current_row = result_matrix.ptr<float>(item);
+        if(current_row[0] > obj_threshold){
+            FaceRes headbox;
+            headbox.confidence = current_row[0];
+            auto *anchor = refer_matrix.ptr<float>(item);
+            auto *bbox = current_row + 1;
+            auto *keyp = current_row + 1 + bbox_head;
+            auto *mask = current_row + 1 + bbox_head + landmark_head;
 
-                headbox.keypoints = {
-                        cv::Point2f((anchor[0] + keyp[0] * anchor[2] * landmark_std) * ratio,
-                                    (anchor[1] + keyp[1] * anchor[3] * landmark_std) * ratio),
-                        cv::Point2f((anchor[0] + keyp[2] * anchor[2] * landmark_std) * ratio,
-                                    (anchor[1] + keyp[3] * anchor[3] * landmark_std) * ratio),
-                        cv::Point2f((anchor[0] + keyp[4] * anchor[2] * landmark_std) * ratio,
-                                    (anchor[1] + keyp[5] * anchor[3] * landmark_std) * ratio),
-                        cv::Point2f((anchor[0] + keyp[6] * anchor[2] * landmark_std) * ratio,
-                                    (anchor[1] + keyp[7] * anchor[3] * landmark_std) * ratio),
-                        cv::Point2f((anchor[0] + keyp[8] * anchor[2] * landmark_std) * ratio,
-                                    (anchor[1] + keyp[9] * anchor[3] * landmark_std) * ratio)
-                };
+            headbox.face_box.x = (anchor[0] + bbox[0] * anchor[2]) * ratio;
+            headbox.face_box.y = (anchor[1] + bbox[1] * anchor[3]) * ratio;
+            headbox.face_box.w = anchor[2] * exp(bbox[2]) * ratio;
+            headbox.face_box.h = anchor[3] * exp(bbox[3]) * ratio;
 
-                if (detect_mask and mask[0] > mask_thresh)
-                    headbox.has_mask = true;
-                result.push_back(headbox);
-            }
+            headbox.keypoints = {
+                    cv::Point(int((anchor[0] + keyp[0] * anchor[2] * landmark_std) * ratio), int((anchor[1] + keyp[1] * anchor[3] * landmark_std) * ratio)),
+                    cv::Point(int((anchor[0] + keyp[2] * anchor[2] * landmark_std) * ratio), int((anchor[1] + keyp[3] * anchor[3] * landmark_std) * ratio)),
+                    cv::Point(int((anchor[0] + keyp[4] * anchor[2] * landmark_std) * ratio), int((anchor[1] + keyp[5] * anchor[3] * landmark_std) * ratio)),
+                    cv::Point(int((anchor[0] + keyp[6] * anchor[2] * landmark_std) * ratio), int((anchor[1] + keyp[7] * anchor[3] * landmark_std) * ratio)),
+                    cv::Point(int((anchor[0] + keyp[8] * anchor[2] * landmark_std) * ratio), int((anchor[1] + keyp[9] * anchor[3] * landmark_std) * ratio))
+            };
+
+            if (detect_mask and mask[0] > mask_thresh)
+                headbox.has_mask = true;
+            result.push_back(headbox);
         }
-        NmsDetect(result);
-        vec_result.push_back(result);
-        index++;
     }
+    NmsDetect(result);
+    vec_result.push_back(result);
     return vec_result;
 }
 
